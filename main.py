@@ -15,13 +15,13 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = 8326418387
 
+DOWNLOAD_DIR = "downloads"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-
-DOWNLOAD_DIR = "downloads"
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # =========================
 # DATABASE
@@ -60,11 +60,13 @@ def register_user(user: types.User):
         (user.id,)
     )
 
-    exists = cursor.fetchone()
-
-    if exists:
+    if cursor.fetchone():
         cursor.execute(
-            "UPDATE users SET username = ?, first_name = ?, last_active = ? WHERE user_id = ?",
+            """
+            UPDATE users
+            SET username = ?, first_name = ?, last_active = ?
+            WHERE user_id = ?
+            """,
             (user.username, user.first_name, now, user.id)
         )
     else:
@@ -89,7 +91,6 @@ def add_download(user_id: int, download_type: str):
         """,
         (user_id, download_type, datetime.now().isoformat())
     )
-
     db.commit()
 
 
@@ -103,23 +104,23 @@ async def start(message: types.Message):
 
     await message.answer(
         "👋 Привет!\n\n"
-        "🔗 Просто отправь ссылку на видео из TikTok или Instagram.\n"
-        "Я скачаю его и отправлю тебе."
+        "🔗 Отправь ссылку на видео из TikTok или Instagram.\n\n"
+        "Я постараюсь отправить тебе:\n"
+        "🎬 видео\n"
+        "🎵 музыку отдельным MP3-файлом"
     )
 
 
 # =========================
-# STATISTICS
+# STATS
 # =========================
 
 @dp.message(Command("stats"))
 async def stats(message: types.Message):
 
     if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ У тебя нет доступа к этой команде.")
+        await message.answer("⛔ Доступ запрещён.")
         return
-
-    register_user(message.from_user)
 
     today = date.today().isoformat()
 
@@ -130,7 +131,7 @@ async def stats(message: types.Message):
         "SELECT COUNT(*) FROM users WHERE DATE(joined_at) = ?",
         (today,)
     )
-    new_users_today = cursor.fetchone()[0]
+    new_users = cursor.fetchone()[0]
 
     cursor.execute("SELECT COUNT(*) FROM downloads")
     total_downloads = cursor.fetchone()[0]
@@ -139,7 +140,7 @@ async def stats(message: types.Message):
         "SELECT COUNT(*) FROM downloads WHERE DATE(created_at) = ?",
         (today,)
     )
-    downloads_today = cursor.fetchone()[0]
+    today_downloads = cursor.fetchone()[0]
 
     cursor.execute(
         "SELECT COUNT(*) FROM downloads WHERE download_type = 'video'"
@@ -152,11 +153,11 @@ async def stats(message: types.Message):
     music = cursor.fetchone()[0]
 
     await message.answer(
-        "📊 <b>Статистика бота</b>\n\n"
-        f"👥 Всего пользователей: <b>{total_users}</b>\n"
-        f"🆕 Новых сегодня: <b>{new_users_today}</b>\n\n"
-        f"📥 Всего скачиваний: <b>{total_downloads}</b>\n"
-        f"📥 Скачиваний сегодня: <b>{downloads_today}</b>\n\n"
+        "📊 <b>Статистика</b>\n\n"
+        f"👥 Пользователей: <b>{total_users}</b>\n"
+        f"🆕 Новых сегодня: <b>{new_users}</b>\n\n"
+        f"📥 Скачиваний: <b>{total_downloads}</b>\n"
+        f"📅 Сегодня: <b>{today_downloads}</b>\n\n"
         f"🎬 Видео: <b>{videos}</b>\n"
         f"🎵 Музыка: <b>{music}</b>",
         parse_mode="HTML"
@@ -164,67 +165,115 @@ async def stats(message: types.Message):
 
 
 # =========================
-# DOWNLOAD VIDEO
+# DOWNLOAD
 # =========================
 
 @dp.message(F.text)
-async def download_video(message: types.Message):
+async def download_media(message: types.Message):
 
     register_user(message.from_user)
 
     url = message.text.strip()
 
     if not url.startswith(("http://", "https://")):
-        await message.answer("Пришли нормальную ссылку, пожалуйста.")
+        await message.answer(
+            "🔗 Отправь ссылку на видео."
+        )
         return
 
-    status = await message.answer("⏳ Скачиваю...")
+    status = await message.answer("⏳ Скачиваю видео и музыку...")
+
+    video_file = None
+    audio_file = None
 
     try:
 
-        ydl_opts = {
-            "outtmpl": f"{DOWNLOAD_DIR}/%(id)s.%(ext)s",
+        # ---------- VIDEO ----------
+
+        video_opts = {
+            "outtmpl": f"{DOWNLOAD_DIR}/%(id)s_video.%(ext)s",
             "format": "best[ext=mp4]/best",
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
         }
 
-        with YoutubeDL(ydl_opts) as ydl:
+        with YoutubeDL(video_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
+            video_file = ydl.prepare_filename(info)
 
-            if not os.path.exists(filename):
-                for f in os.listdir(DOWNLOAD_DIR):
-                    if info.get("id") in f:
-                        filename = os.path.join(DOWNLOAD_DIR, f)
-                        break
+        if not os.path.exists(video_file):
+            for f in os.listdir(DOWNLOAD_DIR):
+                if info.get("id") in f and "_video" in f:
+                    video_file = os.path.join(DOWNLOAD_DIR, f)
+                    break
 
-        if not os.path.exists(filename):
+        if not video_file or not os.path.exists(video_file):
             await status.edit_text("❌ Не удалось скачать видео.")
             return
 
-        size_mb = os.path.getsize(filename) / (1024 * 1024)
+        # ---------- AUDIO ----------
 
-        if size_mb > 49:
+        audio_opts = {
+            "outtmpl": f"{DOWNLOAD_DIR}/%(id)s_music.%(ext)s",
+            "format": "bestaudio/best",
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "postprocessors": [
+                {
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "192",
+                }
+            ],
+        }
+
+        with YoutubeDL(audio_opts) as ydl:
+            ydl.download([url])
+
+        audio_file = os.path.join(
+            DOWNLOAD_DIR,
+            f"{info.get('id')}_music.mp3"
+        )
+
+        if not os.path.exists(audio_file):
+            audio_file = None
+
+        # ---------- SIZE CHECK ----------
+
+        video_size = os.path.getsize(video_file) / (1024 * 1024)
+
+        if video_size > 49:
             await status.edit_text(
-                f"❌ Видео слишком большое ({size_mb:.1f} МБ)."
+                f"❌ Видео слишком большое: {video_size:.1f} МБ"
             )
-            os.remove(filename)
             return
 
-        video = FSInputFile(filename)
+        # ---------- SEND VIDEO ----------
 
-        await message.answer_video(
-            video=video,
-            caption="✅ Готово!"
+        await message.answer_document(
+            document=FSInputFile(video_file),
+            caption="🎬 Видео готово"
         )
 
         add_download(message.from_user.id, "video")
 
-        await status.delete()
+        # ---------- SEND MUSIC ----------
 
-        os.remove(filename)
+        if audio_file and os.path.exists(audio_file):
+
+            audio_size = os.path.getsize(audio_file) / (1024 * 1024)
+
+            if audio_size <= 49:
+                await message.answer_document(
+                    document=FSInputFile(audio_file),
+                    caption="🎵 Музыка готова"
+                )
+
+                add_download(message.from_user.id, "music")
+
+        await status.delete()
 
     except Exception as e:
 
@@ -234,6 +283,17 @@ async def download_video(message: types.Message):
             "❌ Не получилось скачать.\n\n"
             "Попробуй другую ссылку."
         )
+
+    finally:
+
+        for file in (video_file, audio_file):
+
+            if file and os.path.exists(file):
+
+                try:
+                    os.remove(file)
+                except Exception:
+                    pass
 
 
 # =========================
