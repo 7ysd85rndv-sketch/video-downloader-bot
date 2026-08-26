@@ -6,7 +6,7 @@ from datetime import datetime, date
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import FSInputFile
+from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from yt_dlp import YoutubeDL
 from dotenv import load_dotenv
 
@@ -95,19 +95,90 @@ def add_download(user_id: int, download_type: str):
 
 
 # =========================
+# USER MENU
+# =========================
+
+def main_menu():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🎬 Скачать видео",
+                    callback_data="download_video"
+                ),
+                InlineKeyboardButton(
+                    text="🎵 Скачать музыку",
+                    callback_data="download_music"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="ℹ️ Помощь",
+                    callback_data="help"
+                )
+            ]
+        ]
+    )
+
+
+# =========================
 # START
 # =========================
 
 @dp.message(CommandStart())
 async def start(message: types.Message):
+
     register_user(message.from_user)
 
     await message.answer(
-        "👋 Привет!\n\n"
-        "🔗 Отправь ссылку на видео из TikTok или Instagram.\n\n"
-        "Я постараюсь отправить тебе:\n"
-        "🎬 видео\n"
-        "🎵 музыку отдельным MP3-файлом"
+        "👋 <b>Привет!</b>\n\n"
+        "Я помогу скачать видео и музыку из поддерживаемых источников.\n\n"
+        "🔗 Просто отправь мне ссылку.",
+        reply_markup=main_menu(),
+        parse_mode="HTML"
+    )
+
+
+# =========================
+# BUTTONS
+# =========================
+
+@dp.callback_query(F.data == "download_video")
+async def button_video(callback: types.CallbackQuery):
+
+    await callback.answer()
+
+    await callback.message.answer(
+        "🎬 <b>Скачать видео</b>\n\n"
+        "Отправь мне ссылку на видео.",
+        parse_mode="HTML"
+    )
+
+
+@dp.callback_query(F.data == "download_music")
+async def button_music(callback: types.CallbackQuery):
+
+    await callback.answer()
+
+    await callback.message.answer(
+        "🎵 <b>Скачать музыку</b>\n\n"
+        "Отправь ссылку — я отправлю аудио отдельным файлом.",
+        parse_mode="HTML"
+    )
+
+
+@dp.callback_query(F.data == "help")
+async def button_help(callback: types.CallbackQuery):
+
+    await callback.answer()
+
+    await callback.message.answer(
+        "ℹ️ <b>Как пользоваться</b>\n\n"
+        "1️⃣ Скопируй ссылку на видео\n"
+        "2️⃣ Отправь её мне\n"
+        "3️⃣ Подожди обработку\n"
+        "4️⃣ Получи видео и музыку отдельными файлами",
+        parse_mode="HTML"
     )
 
 
@@ -153,13 +224,99 @@ async def stats(message: types.Message):
     music = cursor.fetchone()[0]
 
     await message.answer(
-        "📊 <b>Статистика</b>\n\n"
+        "📊 <b>СТАТИСТИКА</b>\n\n"
         f"👥 Пользователей: <b>{total_users}</b>\n"
         f"🆕 Новых сегодня: <b>{new_users}</b>\n\n"
-        f"📥 Скачиваний: <b>{total_downloads}</b>\n"
+        f"📥 Всего скачиваний: <b>{total_downloads}</b>\n"
         f"📅 Сегодня: <b>{today_downloads}</b>\n\n"
         f"🎬 Видео: <b>{videos}</b>\n"
         f"🎵 Музыка: <b>{music}</b>",
+        parse_mode="HTML"
+    )
+
+
+# =========================
+# ADMIN PANEL
+# =========================
+
+@dp.message(Command("admin"))
+async def admin(message: types.Message):
+
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Доступ запрещён.")
+        return
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📊 Статистика",
+                    callback_data="admin_stats"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="👥 Пользователи",
+                    callback_data="admin_users"
+                )
+            ]
+        ]
+    )
+
+    await message.answer(
+        "👑 <b>АДМИН-ПАНЕЛЬ</b>\n\n"
+        "Выбери действие:",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+
+
+@dp.callback_query(F.data == "admin_stats")
+async def admin_stats(callback: types.CallbackQuery):
+
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён.", show_alert=True)
+        return
+
+    await callback.answer()
+
+    today = date.today().isoformat()
+
+    cursor.execute("SELECT COUNT(*) FROM users")
+    users = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM downloads")
+    downloads = cursor.fetchone()[0]
+
+    cursor.execute(
+        "SELECT COUNT(*) FROM downloads WHERE DATE(created_at) = ?",
+        (today,)
+    )
+    today_downloads = cursor.fetchone()[0]
+
+    await callback.message.answer(
+        "📊 <b>Статистика</b>\n\n"
+        f"👥 Пользователи: <b>{users}</b>\n"
+        f"📥 Скачивания: <b>{downloads}</b>\n"
+        f"📅 Сегодня: <b>{today_downloads}</b>",
+        parse_mode="HTML"
+    )
+
+
+@dp.callback_query(F.data == "admin_users")
+async def admin_users(callback: types.CallbackQuery):
+
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещён.", show_alert=True)
+        return
+
+    await callback.answer()
+
+    cursor.execute("SELECT COUNT(*) FROM users")
+    users = cursor.fetchone()[0]
+
+    await callback.message.answer(
+        f"👥 Всего зарегистрированных пользователей: <b>{users}</b>",
         parse_mode="HTML"
     )
 
@@ -181,14 +338,20 @@ async def download_media(message: types.Message):
         )
         return
 
-    status = await message.answer("⏳ Скачиваю видео и музыку...")
+    status = await message.answer(
+        "⏳ <b>Обрабатываю ссылку...</b>",
+        parse_mode="HTML"
+    )
 
     video_file = None
     audio_file = None
+    video_id = None
 
     try:
 
-        # ---------- VIDEO ----------
+        # =========================
+        # VIDEO
+        # =========================
 
         video_opts = {
             "outtmpl": f"{DOWNLOAD_DIR}/%(id)s_video.%(ext)s",
@@ -200,19 +363,27 @@ async def download_media(message: types.Message):
 
         with YoutubeDL(video_opts) as ydl:
             info = ydl.extract_info(url, download=True)
+            video_id = info.get("id")
             video_file = ydl.prepare_filename(info)
 
         if not os.path.exists(video_file):
+
             for f in os.listdir(DOWNLOAD_DIR):
-                if info.get("id") in f and "_video" in f:
+
+                if video_id and video_id in f and "_video" in f:
                     video_file = os.path.join(DOWNLOAD_DIR, f)
                     break
 
         if not video_file or not os.path.exists(video_file):
-            await status.edit_text("❌ Не удалось скачать видео.")
+
+            await status.edit_text(
+                "❌ Не удалось скачать видео."
+            )
             return
 
-        # ---------- AUDIO ----------
+        # =========================
+        # AUDIO MP3
+        # =========================
 
         audio_opts = {
             "outtmpl": f"{DOWNLOAD_DIR}/%(id)s_music.%(ext)s",
@@ -234,44 +405,54 @@ async def download_media(message: types.Message):
 
         audio_file = os.path.join(
             DOWNLOAD_DIR,
-            f"{info.get('id')}_music.mp3"
+            f"{video_id}_music.mp3"
         )
 
-        if not os.path.exists(audio_file):
-            audio_file = None
-
-        # ---------- SIZE CHECK ----------
+        # =========================
+        # SEND VIDEO
+        # =========================
 
         video_size = os.path.getsize(video_file) / (1024 * 1024)
 
-        if video_size > 49:
-            await status.edit_text(
+        if video_size <= 49:
+
+            await message.answer_document(
+                document=FSInputFile(video_file),
+                caption="🎬 <b>Видео готово</b>",
+                parse_mode="HTML"
+            )
+
+            add_download(
+                message.from_user.id,
+                "video"
+            )
+
+        else:
+
+            await message.answer(
                 f"❌ Видео слишком большое: {video_size:.1f} МБ"
             )
-            return
 
-        # ---------- SEND VIDEO ----------
+        # =========================
+        # SEND MUSIC
+        # =========================
 
-        await message.answer_document(
-            document=FSInputFile(video_file),
-            caption="🎬 Видео готово"
-        )
-
-        add_download(message.from_user.id, "video")
-
-        # ---------- SEND MUSIC ----------
-
-        if audio_file and os.path.exists(audio_file):
+        if os.path.exists(audio_file):
 
             audio_size = os.path.getsize(audio_file) / (1024 * 1024)
 
             if audio_size <= 49:
+
                 await message.answer_document(
                     document=FSInputFile(audio_file),
-                    caption="🎵 Музыка готова"
+                    caption="🎵 <b>Музыка готова</b>",
+                    parse_mode="HTML"
                 )
 
-                add_download(message.from_user.id, "music")
+                add_download(
+                    message.from_user.id,
+                    "music"
+                )
 
         await status.delete()
 
@@ -279,10 +460,13 @@ async def download_media(message: types.Message):
 
         logging.error(f"Ошибка: {e}")
 
-        await status.edit_text(
-            "❌ Не получилось скачать.\n\n"
-            "Попробуй другую ссылку."
-        )
+        try:
+            await status.edit_text(
+                "❌ Не удалось обработать ссылку.\n\n"
+                "Попробуй другую ссылку."
+            )
+        except Exception:
+            pass
 
     finally:
 
