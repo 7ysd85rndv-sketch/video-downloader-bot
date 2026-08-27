@@ -36,7 +36,9 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT,
     first_name TEXT,
     joined_at TEXT,
-    last_active TEXT
+    last_active TEXT,
+    referred_by INTEGER DEFAULT NULL,
+    referrals INTEGER DEFAULT 0
 )
 """)
 
@@ -51,8 +53,21 @@ CREATE TABLE IF NOT EXISTS downloads (
 
 db.commit()
 
+# Добавляем новые колонки, если база была создана старой версией
+try:
+    cursor.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER DEFAULT NULL")
+except sqlite3.OperationalError:
+    pass
 
-def register_user(user: types.User):
+try:
+    cursor.execute("ALTER TABLE users ADD COLUMN referrals INTEGER DEFAULT 0")
+except sqlite3.OperationalError:
+    pass
+
+db.commit()
+
+
+def register_user(user: types.User, referred_by=None):
     now = datetime.now().isoformat()
 
     cursor.execute(
@@ -60,24 +75,53 @@ def register_user(user: types.User):
         (user.id,)
     )
 
-    if cursor.fetchone():
+    existing = cursor.fetchone()
+
+    if existing:
         cursor.execute(
             """
             UPDATE users
             SET username = ?, first_name = ?, last_active = ?
             WHERE user_id = ?
             """,
-            (user.username, user.first_name, now, user.id)
+            (
+                user.username,
+                user.first_name,
+                now,
+                user.id
+            )
         )
     else:
+        # Нельзя пригласить самого себя
+        if referred_by == user.id:
+            referred_by = None
+
         cursor.execute(
             """
             INSERT INTO users
-            (user_id, username, first_name, joined_at, last_active)
-            VALUES (?, ?, ?, ?, ?)
+            (user_id, username, first_name, joined_at, last_active, referred_by, referrals)
+            VALUES (?, ?, ?, ?, ?, ?, 0)
             """,
-            (user.id, user.username, user.first_name, now, now)
+            (
+                user.id,
+                user.username,
+                user.first_name,
+                now,
+                now,
+                referred_by
+            )
         )
+
+        # Засчитываем реферала
+        if referred_by:
+            cursor.execute(
+                """
+                UPDATE users
+                SET referrals = referrals + 1
+                WHERE user_id = ?
+                """,
+                (referred_by,)
+            )
 
     db.commit()
 
@@ -89,7 +133,11 @@ def add_download(user_id: int, download_type: str):
         (user_id, download_type, created_at)
         VALUES (?, ?, ?)
         """,
-        (user_id, download_type, datetime.now().isoformat())
+        (
+            user_id,
+            download_type,
+            datetime.now().isoformat()
+        )
     )
     db.commit()
 
@@ -113,6 +161,12 @@ def main_menu():
             ],
             [
                 InlineKeyboardButton(
+                    text="👥 Пригласить друга",
+                    callback_data="referral"
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     text="ℹ️ Помощь",
                     callback_data="help"
                 )
@@ -122,18 +176,123 @@ def main_menu():
 
 
 # =========================
-# START
+# START + REFERRALS
 # =========================
 
 @dp.message(CommandStart())
 async def start(message: types.Message):
 
-    register_user(message.from_user)
+    referred_by = None
+
+    # Получаем параметр из /start
+    args = message.text.split(maxsplit=1)
+
+    if len(args) > 1:
+        referral_code = args[1]
+
+        if referral_code.startswith("ref_"):
+            try:
+                referred_by = int(
+                    referral_code.replace("ref_", "")
+                )
+            except ValueError:
+                referred_by = None
+
+    # Регистрируем пользователя
+    register_user(
+        message.from_user,
+        referred_by
+    )
+
+    # Получаем количество приглашённых
+    cursor.execute(
+        "SELECT referrals FROM users WHERE user_id = ?",
+        (message.from_user.id,)
+    )
+
+    result = cursor.fetchone()
+    referrals = result[0] if result else 0
 
     await message.answer(
         "👋 <b>Привет!</b>\n\n"
-        "Я помогу скачать видео и музыку из поддерживаемых источников.\n\n"
-        "🔗 Просто отправь мне ссылку.",
+        "Я помогу скачать видео и музыку из "
+        "TikTok, Instagram и Pinterest.\n\n"
+        "🔗 Просто отправь мне ссылку.\n\n"
+        f"👥 Ты пригласил друзей: <b>{referrals}</b>",
+        reply_markup=main_menu(),
+        parse_mode="HTML"
+    )
+
+
+# =========================
+# REFERRAL BUTTON
+# =========================
+
+@dp.callback_query(F.data == "referral")
+async def referral(callback: types.CallbackQuery):
+
+    await callback.answer()
+
+    user_id = callback.from_user.id
+
+    cursor.execute(
+        "SELECT referrals FROM users WHERE user_id = ?",
+        (user_id,)
+    )
+
+    result = cursor.fetchone()
+    referrals = result[0] if result else 0
+
+    referral_link = (
+        f"https://t.me/topsavevideobot?start=ref_{user_id}"
+    )
+
+    share_url = (
+        "https://t.me/share/url"
+        f"?url={referral_link}"
+        "&text=Попробуй этого бота для скачивания видео из TikTok, Instagram и Pinterest 👇"
+    )
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📤 Поделиться ботом",
+                    url=share_url
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="◀️ Назад",
+                    callback_data="back_menu"
+                )
+            ]
+        ]
+    )
+
+    await callback.message.answer(
+        "👥 <b>Приглашай друзей</b>\n\n"
+        "Отправь другу свою ссылку. "
+        "Если он впервые запустит бота по ней — "
+        "он будет засчитан как твой реферал.\n\n"
+        f"🔗 <code>{referral_link}</code>\n\n"
+        f"👥 Приглашено: <b>{referrals}</b>",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+
+
+# =========================
+# BACK MENU
+# =========================
+
+@dp.callback_query(F.data == "back_menu")
+async def back_menu(callback: types.CallbackQuery):
+
+    await callback.answer()
+
+    await callback.message.answer(
+        "🏠 <b>Главное меню</b>",
         reply_markup=main_menu(),
         parse_mode="HTML"
     )
@@ -223,10 +382,16 @@ async def stats(message: types.Message):
     )
     music = cursor.fetchone()[0]
 
+    cursor.execute(
+        "SELECT SUM(referrals) FROM users"
+    )
+    total_referrals = cursor.fetchone()[0] or 0
+
     await message.answer(
         "📊 <b>СТАТИСТИКА</b>\n\n"
         f"👥 Пользователей: <b>{total_users}</b>\n"
-        f"🆕 Новых сегодня: <b>{new_users}</b>\n\n"
+        f"🆕 Новых сегодня: <b>{new_users}</b>\n"
+        f"👥 Рефералов: <b>{total_referrals}</b>\n\n"
         f"📥 Всего скачиваний: <b>{total_downloads}</b>\n"
         f"📅 Сегодня: <b>{today_downloads}</b>\n\n"
         f"🎬 Видео: <b>{videos}</b>\n"
@@ -259,6 +424,12 @@ async def admin(message: types.Message):
                     text="👥 Пользователи",
                     callback_data="admin_users"
                 )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🏆 Топ рефералов",
+                    callback_data="top_referrals"
+                )
             ]
         ]
     )
@@ -275,7 +446,10 @@ async def admin(message: types.Message):
 async def admin_stats(callback: types.CallbackQuery):
 
     if callback.from_user.id != ADMIN_ID:
-        await callback.answer("⛔ Доступ запрещён.", show_alert=True)
+        await callback.answer(
+            "⛔ Доступ запрещён.",
+            show_alert=True
+        )
         return
 
     await callback.answer()
@@ -294,11 +468,17 @@ async def admin_stats(callback: types.CallbackQuery):
     )
     today_downloads = cursor.fetchone()[0]
 
+    cursor.execute(
+        "SELECT SUM(referrals) FROM users"
+    )
+    referrals = cursor.fetchone()[0] or 0
+
     await callback.message.answer(
         "📊 <b>Статистика</b>\n\n"
         f"👥 Пользователи: <b>{users}</b>\n"
         f"📥 Скачивания: <b>{downloads}</b>\n"
-        f"📅 Сегодня: <b>{today_downloads}</b>",
+        f"📅 Сегодня: <b>{today_downloads}</b>\n"
+        f"👥 Рефералы: <b>{referrals}</b>",
         parse_mode="HTML"
     )
 
@@ -307,7 +487,10 @@ async def admin_stats(callback: types.CallbackQuery):
 async def admin_users(callback: types.CallbackQuery):
 
     if callback.from_user.id != ADMIN_ID:
-        await callback.answer("⛔ Доступ запрещён.", show_alert=True)
+        await callback.answer(
+            "⛔ Доступ запрещён.",
+            show_alert=True
+        )
         return
 
     await callback.answer()
@@ -317,6 +500,63 @@ async def admin_users(callback: types.CallbackQuery):
 
     await callback.message.answer(
         f"👥 Всего зарегистрированных пользователей: <b>{users}</b>",
+        parse_mode="HTML"
+    )
+
+
+# =========================
+# TOP REFERRALS
+# =========================
+
+@dp.callback_query(F.data == "top_referrals")
+async def top_referrals(callback: types.CallbackQuery):
+
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer(
+            "⛔ Доступ запрещён.",
+            show_alert=True
+        )
+        return
+
+    await callback.answer()
+
+    cursor.execute("""
+        SELECT first_name, username, referrals
+        FROM users
+        WHERE referrals > 0
+        ORDER BY referrals DESC
+        LIMIT 10
+    """)
+
+    rows = cursor.fetchall()
+
+    if not rows:
+        await callback.message.answer(
+            "🏆 Пока никто не пригласил пользователей."
+        )
+        return
+
+    text = "🏆 <b>ТОП РЕФЕРАЛОВ</b>\n\n"
+
+    medals = ["🥇", "🥈", "🥉"]
+
+    for i, row in enumerate(rows):
+        first_name, username, referrals = row
+
+        name = first_name or "Без имени"
+
+        if username:
+            name += f" (@{username})"
+
+        medal = medals[i] if i < 3 else f"{i + 1}."
+
+        text += (
+            f"{medal} {name} — "
+            f"<b>{referrals}</b> приглашённых\n"
+        )
+
+    await callback.message.answer(
+        text,
         parse_mode="HTML"
     )
 
@@ -362,8 +602,14 @@ async def download_media(message: types.Message):
         }
 
         with YoutubeDL(video_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+
+            info = ydl.extract_info(
+                url,
+                download=True
+            )
+
             video_id = info.get("id")
+
             video_file = ydl.prepare_filename(info)
 
         if not os.path.exists(video_file):
@@ -371,7 +617,12 @@ async def download_media(message: types.Message):
             for f in os.listdir(DOWNLOAD_DIR):
 
                 if video_id and video_id in f and "_video" in f:
-                    video_file = os.path.join(DOWNLOAD_DIR, f)
+
+                    video_file = os.path.join(
+                        DOWNLOAD_DIR,
+                        f
+                    )
+
                     break
 
         if not video_file or not os.path.exists(video_file):
@@ -379,6 +630,7 @@ async def download_media(message: types.Message):
             await status.edit_text(
                 "❌ Не удалось скачать видео."
             )
+
             return
 
         # =========================
@@ -401,6 +653,7 @@ async def download_media(message: types.Message):
         }
 
         with YoutubeDL(audio_opts) as ydl:
+
             ydl.download([url])
 
         audio_file = os.path.join(
@@ -412,7 +665,10 @@ async def download_media(message: types.Message):
         # SEND VIDEO
         # =========================
 
-        video_size = os.path.getsize(video_file) / (1024 * 1024)
+        video_size = (
+            os.path.getsize(video_file)
+            / (1024 * 1024)
+        )
 
         if video_size <= 49:
 
@@ -430,7 +686,8 @@ async def download_media(message: types.Message):
         else:
 
             await message.answer(
-                f"❌ Видео слишком большое: {video_size:.1f} МБ"
+                f"❌ Видео слишком большое: "
+                f"{video_size:.1f} МБ"
             )
 
         # =========================
@@ -439,7 +696,10 @@ async def download_media(message: types.Message):
 
         if os.path.exists(audio_file):
 
-            audio_size = os.path.getsize(audio_file) / (1024 * 1024)
+            audio_size = (
+                os.path.getsize(audio_file)
+                / (1024 * 1024)
+            )
 
             if audio_size <= 49:
 
@@ -458,24 +718,32 @@ async def download_media(message: types.Message):
 
     except Exception as e:
 
-        logging.error(f"Ошибка: {e}")
+        logging.error(
+            f"Ошибка: {e}"
+        )
 
         try:
+
             await status.edit_text(
                 "❌ Не удалось обработать ссылку.\n\n"
                 "Попробуй другую ссылку."
             )
+
         except Exception:
             pass
 
     finally:
 
-        for file in (video_file, audio_file):
+        for file in (
+            video_file,
+            audio_file
+        ):
 
             if file and os.path.exists(file):
 
                 try:
                     os.remove(file)
+
                 except Exception:
                     pass
 
